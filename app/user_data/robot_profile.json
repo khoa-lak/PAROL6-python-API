@@ -1,0 +1,158 @@
+{
+  "dh_table": [
+    {
+      "joint": 1,
+      "name": "J1 (Shoulder Base)",
+      "a": 0.0,
+      "alpha_deg": 90.0,
+      "d": 118.0,
+      "offset_deg": 0.0,
+      "min_deg": -170.0,
+      "max_deg": 170.0
+    },
+    {
+      "joint": 2,
+      "name": "J2 (Upper Arm)",
+      "a": 145.0,
+      "alpha_deg": 0.0,
+      "d": 0.0,
+      "offset_deg": 90.0,
+      "min_deg": -100.0,
+      "max_deg": 90.0
+    },
+    {
+      "joint": 3,
+      "name": "J3 (Elbow)",
+      "a": 0.0,
+      "alpha_deg": 90.0,
+      "d": 0.0,
+      "offset_deg": 0.0,
+      "min_deg": -150.0,
+      "max_deg": 130.0
+    },
+    {
+      "joint": 4,
+      "name": "J4 (Forearm)",
+      "a": 0.0,
+      "alpha_deg": -90.0,
+      "d": 175.0,
+      "offset_deg": 0.0,
+      "min_deg": -180.0,
+      "max_deg": 180.0
+    },
+    {
+      "joint": 5,
+      "name": "J5 (Wrist)",
+      "a": 0.0,
+      "alpha_deg": 90.0,
+      "d": 0.0,
+      "offset_deg": 0.0,
+      "min_deg": -105.0,
+      "max_deg": 105.0
+    },
+    {
+      "joint": 6,
+      "name": "J6 (Flange)",
+      "a": 0.0,
+      "alpha_deg": 0.0,
+      "d": 70.0,
+      "offset_deg": 0.0,
+      "min_deg": -360.0,
+      "max_deg": 360.0
+    }
+  ],
+  "link_offsets": [
+    {
+      "link": 0,
+      "name": "Link 0 (Base)",
+      "dx": 0.0,
+      "dy": 0.0,
+      "dz": 0.0,
+      "rx": 0.0,
+      "ry": 0.0,
+      "rz": 0.0,
+      "scale": 1.0,
+      "stl_file": "Part1.stl"
+    },
+    {
+      "link": 1,
+      "name": "Link 1 (Shoulder)",
+      "dx": 0.0,
+      "dy": 0.0,
+      "dz": 0.0,
+      "rx": 0.0,
+      "ry": 0.0,
+      "rz": 0.0,
+      "scale": 1.0,
+      "stl_file": null
+    },
+    {
+      "link": 2,
+      "name": "Link 2 (Upper Arm)",
+      "dx": 0.0,
+      "dy": 0.0,
+      "dz": 0.0,
+      "rx": 0.0,
+      "ry": 0.0,
+      "rz": 0.0,
+      "scale": 1.0,
+      "stl_file": null
+    },
+    {
+      "link": 3,
+      "name": "Link 3 (Elbow)",
+      "dx": 0.0,
+      "dy": 0.0,
+      "dz": 0.0,
+      "rx": 0.0,
+      "ry": 0.0,
+      "rz": 0.0,
+      "scale": 1.0,
+      "stl_file": null
+    },
+    {
+      "link": 4,
+      "name": "Link 4 (Forearm)",
+      "dx": 0.0,
+      "dy": 0.0,
+      "dz": 0.0,
+      "rx": 0.0,
+      "ry": 0.0,
+      "rz": 0.0,
+      "scale": 1.0,
+      "stl_file": null
+    },
+    {
+      "link": 5,
+      "name": "Link 5 (Wrist)",
+      "dx": 0.0,
+      "dy": 0.0,
+      "dz": 0.0,
+      "rx": 0.0,
+      "ry": 0.0,
+      "rz": 0.0,
+      "scale": 1.0,
+      "stl_file": null
+    },
+    {
+      "link": 6,
+      "name": "Link 6 (Flange)",
+      "dx": 0.0,
+      "dy": 0.0,
+      "dz": 0.0,
+      "rx": 0.0,
+      "ry": 0.0,
+      "rz": 0.0,
+      "scale": 1.0,
+      "stl_file": null
+    }
+  ],
+  "tcp_offset": {
+    "x": 0,
+    "y": 0,
+    "z": 65,
+    "roll": 0,
+    "pitch": 0,
+    "yaw": 0
+  }
+}
