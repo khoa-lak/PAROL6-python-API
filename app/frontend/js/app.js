@@ -18,6 +18,8 @@ class AppController {
     this.activeWorkspace = 'ws-assembly';
     this.selectedTargetType = null; // 'robot_link' | 'workcell' | null
     this.selectedPartIndex = -1;
+    this.undoStack = [];
+    this.redoStack = [];
 
     this.stlManager = new STLManager(this.robot, this.viewport.scene, this);
     window.stlManager = this.stlManager;
@@ -30,6 +32,9 @@ class AppController {
 
     // 3D Raycaster Click Callback
     this.viewport.onPartSelected3D = (selection) => this.handle3DSelection(selection);
+    this.viewport.onGizmoDragging = (isDragging) => {
+      if (isDragging) this.pushUndoState();
+    };
     this.viewport.onGizmoChange = (object) => this.onGizmoManipulated(object);
     this.updatePickableObjects();
 
@@ -165,32 +170,126 @@ class AppController {
       document.getElementById('btn-export-gcode')?.click();
     };
 
+    const triggerClearAll3D = async () => {
+      await this.stlManager.clearAllModelParts();
+    };
+    const triggerRestoreDefaults = async () => {
+      await this.stlManager.restoreDefaultModelBlocks();
+    };
+    const triggerDeleteActiveModel = async () => {
+      await this.stlManager.deleteOrResetModel(this.stlManager.activeModelId);
+    };
+
+    const menuClear3D = document.getElementById('menu-clear-all-3d');
+    if (menuClear3D) menuClear3D.onclick = triggerClearAll3D;
+    const menuRestoreDef = document.getElementById('menu-restore-default-blocks');
+    if (menuRestoreDef) menuRestoreDef.onclick = triggerRestoreDefaults;
+
+    const btnHeaderDelModel = document.getElementById('btn-header-delete-model');
+    if (btnHeaderDelModel) btnHeaderDelModel.onclick = triggerDeleteActiveModel;
+
+    const btnClearAllParts = document.getElementById('btn-clear-all-parts');
+    if (btnClearAllParts) btnClearAllParts.onclick = triggerClearAll3D;
+    const btnRestoreDefParts = document.getElementById('btn-restore-default-parts');
+    if (btnRestoreDefParts) btnRestoreDefParts.onclick = triggerRestoreDefaults;
+
     // Quick toolbar buttons
     document.getElementById('btn-quick-open').onclick = triggerOpenFile;
     document.getElementById('btn-quick-save').onclick = triggerSaveCurrent;
     document.getElementById('btn-quick-save-as').onclick = triggerSaveAs;
+    const btnQuickUndo = document.getElementById('btn-quick-undo');
+    if (btnQuickUndo) btnQuickUndo.onclick = () => this.undo();
 
     // Assembly sidebar buttons
     document.getElementById('btn-assembly-save').onclick = triggerSaveCurrent;
     document.getElementById('btn-assembly-save-as').onclick = triggerSaveAs;
     document.getElementById('btn-assembly-export').onclick = () => this.stlManager.exportCurrentModelBundle();
-    document.getElementById('btn-assembly-delete').onclick = async () => {
-      const msg = this.stlManager.activeModelId === 'parol6_default'
-        ? 'Khôi phục PAROL6 Mặc Định về hình khối cơ bản và xóa các STL đã gắn?'
-        : `Xóa Model Cánh Tay "${this.stlManager.activeModelName}"?`;
-      if (!confirm(msg)) return;
-      await this.stlManager.deleteOrResetModel(this.stlManager.activeModelId);
-    };
+    document.getElementById('btn-assembly-delete').onclick = triggerDeleteActiveModel;
 
-    // Keyboard shortcut Ctrl+S to save model
-    window.addEventListener('keydown', (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+    // Keyboard shortcuts: Ctrl+S (Save), Ctrl+Z (Undo), Ctrl+Y (Redo), Escape (Deselect), Delete
+    window.addEventListener('keydown', async (e) => {
+      const ctrl = e.ctrlKey || e.metaKey;
+      if (ctrl && e.key.toLowerCase() === 's') {
         e.preventDefault();
         triggerSaveCurrent();
+      } else if (ctrl && e.key.toLowerCase() === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        this.undo();
+      } else if ((ctrl && e.key.toLowerCase() === 'y') || (ctrl && e.shiftKey && e.key.toLowerCase() === 'z')) {
+        e.preventDefault();
+        this.redo();
       } else if (e.key === 'Escape') {
         this.deselectPart();
+      } else if (e.key === 'Delete' && document.activeElement?.tagName !== 'INPUT') {
+        if (this.selectedTargetType === 'robot_link' && this.selectedPartIndex >= 0) {
+          this.pushUndoState();
+          await this.stlManager.deleteSinglePart(this.selectedPartIndex);
+        } else if (this.selectedTargetType === 'workcell' && this.selectedPartIndex >= 0) {
+          this.stlManager.removeWorkcellObject(this.selectedPartIndex);
+        }
       }
     });
+  }
+
+  pushUndoState() {
+    const snap = {
+      linkOffsets: JSON.parse(JSON.stringify(this.robot.linkOffsets)),
+      dhTable: JSON.parse(JSON.stringify(this.robot.dhTable)),
+      tcpOffset: JSON.parse(JSON.stringify(this.robot.tcpOffset)),
+      joints: [...this.robot.joints]
+    };
+    this.undoStack.push(snap);
+    if (this.undoStack.length > 40) this.undoStack.shift();
+    this.redoStack = [];
+  }
+
+  undo() {
+    if (this.undoStack.length === 0) {
+      this.updateHUDStatus('Không còn thao tác nào để hoàn tác (Undo)', 'normal');
+      return;
+    }
+    const currentSnap = {
+      linkOffsets: JSON.parse(JSON.stringify(this.robot.linkOffsets)),
+      dhTable: JSON.parse(JSON.stringify(this.robot.dhTable)),
+      tcpOffset: JSON.parse(JSON.stringify(this.robot.tcpOffset)),
+      joints: [...this.robot.joints]
+    };
+    this.redoStack.push(currentSnap);
+
+    const prev = this.undoStack.pop();
+    this.robot.restoreSnapshot(prev);
+    this.renderPartTreeList();
+    this.renderDHEditorTable();
+    this.syncTCPInputsFromModel();
+    this.setupFKSliders();
+    this.syncFromJoints(this.robot.joints);
+    if (this.selectedTargetType === 'robot_link' && this.selectedPartIndex >= 0) {
+      this.populateInspectorForPart(this.selectedPartIndex);
+    }
+    this.updateHUDStatus('↩ Đã hoàn tác (Undo)', 'normal');
+  }
+
+  redo() {
+    if (this.redoStack.length === 0) return;
+    const currentSnap = {
+      linkOffsets: JSON.parse(JSON.stringify(this.robot.linkOffsets)),
+      dhTable: JSON.parse(JSON.stringify(this.robot.dhTable)),
+      tcpOffset: JSON.parse(JSON.stringify(this.robot.tcpOffset)),
+      joints: [...this.robot.joints]
+    };
+    this.undoStack.push(currentSnap);
+
+    const next = this.redoStack.pop();
+    this.robot.restoreSnapshot(next);
+    this.renderPartTreeList();
+    this.renderDHEditorTable();
+    this.syncTCPInputsFromModel();
+    this.setupFKSliders();
+    this.syncFromJoints(this.robot.joints);
+    if (this.selectedTargetType === 'robot_link' && this.selectedPartIndex >= 0) {
+      this.populateInspectorForPart(this.selectedPartIndex);
+    }
+    this.updateHUDStatus('↪ Đã làm lại (Redo)', 'normal');
   }
 
   /* --------- 3. 3D Part Selection, Part Tree & Floating Part Inspector --------- */
@@ -202,35 +301,61 @@ class AppController {
     for (let i = 0; i <= 6; i++) {
       const off = this.robot.linkOffsets[i] || {};
       const stlName = off.stl_file;
+      const isDeleted = !!off.deleted;
       const isSelected = (this.selectedTargetType === 'robot_link' && this.selectedPartIndex === i);
+
+      let statusText = '▫ Khối 3D có sẵn (Mặc định)';
+      let statusClass = '';
+      if (isDeleted) {
+        statusText = '⚪ Đã xóa trống (Chưa có hình 3D)';
+      } else if (stlName) {
+        const axTag = i > 0 ? ` | Quay: ${(off.rot_axis || 'z').toUpperCase()}` : '';
+        statusText = `✅ STL: ${stlName}${axTag}`;
+        statusClass = 'has-stl';
+      }
 
       const item = document.createElement('div');
       item.className = `part-tree-item ${isSelected ? 'selected' : ''}`;
       item.innerHTML = `
         <div class="part-tree-info">
-          <span class="part-tree-name">${off.name || 'Part ' + i}</span>
-          <span class="part-tree-stl ${stlName ? 'has-stl' : ''}">
-            ${stlName ? '✅ STL: ' + stlName : '▫ Khối 3D mặc định'}
+          <span class="part-tree-name" style="${isDeleted ? 'color: var(--text-dim);' : ''}">${off.name || 'Part ' + i}</span>
+          <span class="part-tree-stl ${statusClass}">
+            ${statusText}
           </span>
         </div>
-        <button class="btn" style="padding: 3px 7px; font-size: 10px;" title="Chọn file .stl gắn vào Part này">
-          📥 Gắn STL
-        </button>
+        <div style="display: flex; gap: 4px; align-items: center;">
+          <button class="btn btn-part-import" style="padding: 3px 6px; font-size: 10px;" title="Chọn file .stl gắn vào Part này">
+            📥 Gắn STL
+          </button>
+          ${!isDeleted ? `
+            <button class="btn btn-danger btn-part-delete" style="padding: 3px 6px; font-size: 10px;" title="Xóa khối 3D / file STL của Part này khỏi màn hình">
+              🗑 Xóa
+            </button>
+          ` : ''}
+        </div>
       `;
 
-      // Clicking the row selects this Part in 3D and opens the Inspector
       item.onclick = (e) => {
         if (e.target.tagName === 'BUTTON') return;
         this.selectRobotPart(i);
       };
 
-      // Clicking "📥 Gắn STL" opens file dialog for this Part
-      const btnImport = item.querySelector('button');
-      btnImport.onclick = (e) => {
-        e.stopPropagation();
-        this.selectRobotPart(i);
-        this.stlManager.promptImportSTLForPart(i);
-      };
+      const btnImport = item.querySelector('.btn-part-import');
+      if (btnImport) {
+        btnImport.onclick = (e) => {
+          e.stopPropagation();
+          this.selectRobotPart(i);
+          this.stlManager.promptImportSTLForPart(i);
+        };
+      }
+
+      const btnDel = item.querySelector('.btn-part-delete');
+      if (btnDel) {
+        btnDel.onclick = async (e) => {
+          e.stopPropagation();
+          await this.stlManager.deleteSinglePart(i);
+        };
+      }
 
       container.appendChild(item);
     }
@@ -286,12 +411,17 @@ class AppController {
     const rnd = (v) => Math.round(v * 10) / 10;
 
     document.getElementById('insp-pos-x').value = rnd(obj.mesh.position.x);
-    document.getElementById('insp-pos-y').value = rnd(obj.mesh.position.z);
+    document.getElementById('insp-pos-y').value = rnd(-obj.mesh.position.z);
     document.getElementById('insp-pos-z').value = rnd(obj.mesh.position.y);
     document.getElementById('insp-rot-x').value = deg(obj.mesh.rotation.x);
-    document.getElementById('insp-rot-y').value = deg(obj.mesh.rotation.z);
+    document.getElementById('insp-rot-y').value = deg(-obj.mesh.rotation.z);
     document.getElementById('insp-rot-z').value = deg(obj.mesh.rotation.y);
     document.getElementById('insp-scale').value = rnd(obj.mesh.scale.x);
+
+    const pivotSec = document.getElementById('insp-pivot-section');
+    if (pivotSec) pivotSec.style.display = 'none';
+    const rotAxisRow = document.getElementById('insp-rot-axis-row');
+    if (rotAxisRow) rotAxisRow.style.display = 'none';
 
     this.renderPartTreeList();
   }
@@ -325,12 +455,17 @@ class AppController {
     const bounds = this.robot.stlBounds[linkIndex];
     const dimStr = bounds ? ` (${bounds.width}×${bounds.depth}×${bounds.height} mm)` : '';
     const fileLabel = document.getElementById('insp-stl-filename');
+    const boundsLabel = document.getElementById('insp-stl-bounds');
     if (off.stl_file) {
       fileLabel.innerText = `✅ ${off.stl_file}${dimStr}`;
       fileLabel.style.color = 'var(--success)';
+      if (boundsLabel && bounds) {
+        boundsLabel.innerText = `Tọa độ trong STL: X[${bounds.minX}..${bounds.maxX}] Y[${bounds.minY}..${bounds.maxY}] Z[${bounds.minZ}..${bounds.maxZ}]`;
+      }
     } else {
       fileLabel.innerText = '▫ Đang dùng hình khối 3D mặc định';
       fileLabel.style.color = 'var(--text-dim)';
+      if (boundsLabel) boundsLabel.innerText = '';
     }
 
     // Luôn lấy TỌA ĐỘ THỰC (X, Y, Z, Rx, Ry, Rz) tính trực tiếp từ Gốc Cố Định (0,0,0)!
@@ -343,9 +478,33 @@ class AppController {
     document.getElementById('insp-rot-z').value = truePose.rz;
     document.getElementById('insp-scale').value = truePose.scale;
 
+    const pivotSec = document.getElementById('insp-pivot-section');
+    if (pivotSec) pivotSec.style.display = 'block';
+    document.getElementById('insp-pivot-x').value = truePose.pivot_dx ?? 0;
+    document.getElementById('insp-pivot-y').value = truePose.pivot_dy ?? 0;
+    document.getElementById('insp-pivot-z').value = truePose.pivot_dz ?? 0;
+    document.getElementById('insp-pivot-rx').value = truePose.pivot_rx ?? 0;
+    document.getElementById('insp-pivot-ry').value = truePose.pivot_ry ?? 0;
+    document.getElementById('insp-pivot-rz').value = truePose.pivot_rz ?? 0;
+
     const alignSelect = document.getElementById('insp-align-mode');
     if (alignSelect) {
-      alignSelect.value = off.align_mode || 'bottom';
+      alignSelect.value = off.align_mode || 'cad';
+    }
+    const upAxisSelect = document.getElementById('insp-up-axis');
+    if (upAxisSelect) {
+      upAxisSelect.value = off.stl_up_axis || 'z';
+    }
+    const rotAxisRow = document.getElementById('insp-rot-axis-row');
+    const rotAxisSelect = document.getElementById('insp-rot-axis');
+    if (rotAxisRow && rotAxisSelect) {
+      if (linkIndex === 0) {
+        rotAxisRow.style.display = 'none';
+      } else {
+        rotAxisRow.style.display = 'flex';
+        const defaultAxes = ["z", "z", "y", "y", "z", "y", "z"];
+        rotAxisSelect.value = off.rot_axis || defaultAxes[linkIndex];
+      }
     }
   }
 
@@ -361,11 +520,9 @@ class AppController {
     document.getElementById('btn-insp-reset-part').onclick = async () => {
       if (this.selectedTargetType === 'robot_link' && this.selectedPartIndex >= 0) {
         const i = this.selectedPartIndex;
-        if (!confirm(`Gỡ file STL của Part ${i} và quay về khối mặc định?`)) return;
-        this.robot.resetSingleLinkToDefault(i);
-        this.populateInspectorForPart(i);
-        this.renderPartTreeList();
-        await this.saveOffsetsToServer(false);
+        await this.stlManager.deleteSinglePart(i);
+      } else if (this.selectedTargetType === 'workcell' && this.selectedPartIndex >= 0) {
+        this.stlManager.removeWorkcellObject(this.selectedPartIndex);
       }
     };
 
@@ -385,20 +542,32 @@ class AppController {
           rx: rx, ry: ry, rz: rz,
           scale: sc
         });
+        this.robot.setPartPivotOffset(i, {
+          pivot_dx: parseFloat(document.getElementById('insp-pivot-x')?.value) || 0,
+          pivot_dy: parseFloat(document.getElementById('insp-pivot-y')?.value) || 0,
+          pivot_dz: parseFloat(document.getElementById('insp-pivot-z')?.value) || 0,
+          pivot_rx: parseFloat(document.getElementById('insp-pivot-rx')?.value) || 0,
+          pivot_ry: parseFloat(document.getElementById('insp-pivot-ry')?.value) || 0,
+          pivot_rz: parseFloat(document.getElementById('insp-pivot-rz')?.value) || 0
+        });
       } else if (this.selectedTargetType === 'workcell' && this.selectedPartIndex >= 0) {
         const obj = this.stlManager.workcellObjects[this.selectedPartIndex];
         if (obj && obj.mesh) {
           const r = (d) => THREE.MathUtils.degToRad(d);
-          obj.mesh.position.set(px, pz, py);
-          obj.mesh.rotation.set(r(rx), r(rz), r(ry));
+          obj.mesh.position.set(px, pz, -py);
+          obj.mesh.rotation.set(r(rx), r(rz), r(-ry));
           obj.mesh.scale.set(sc, sc, sc);
         }
       }
     };
 
-    ['insp-pos-x', 'insp-pos-y', 'insp-pos-z', 'insp-rot-x', 'insp-rot-y', 'insp-rot-z', 'insp-scale'].forEach(id => {
+    [
+      'insp-pos-x', 'insp-pos-y', 'insp-pos-z', 'insp-rot-x', 'insp-rot-y', 'insp-rot-z', 'insp-scale',
+      'insp-pivot-x', 'insp-pivot-y', 'insp-pivot-z', 'insp-pivot-rx', 'insp-pivot-ry', 'insp-pivot-rz'
+    ].forEach(id => {
       const el = document.getElementById(id);
       if (el) {
+        el.addEventListener('focus', () => this.pushUndoState());
         el.addEventListener('input', applyInspectorInputsLive);
       }
     });
@@ -407,12 +576,43 @@ class AppController {
     if (alignSelect) {
       alignSelect.addEventListener('change', (e) => {
         if (this.selectedTargetType === 'robot_link' && this.selectedPartIndex >= 0) {
+          this.pushUndoState();
           this.robot.setPartAlignMode(this.selectedPartIndex, e.target.value);
         }
       });
     }
 
+    const upAxisSelect = document.getElementById('insp-up-axis');
+    if (upAxisSelect) {
+      upAxisSelect.addEventListener('change', (e) => {
+        if (this.selectedTargetType === 'robot_link' && this.selectedPartIndex >= 0) {
+          this.pushUndoState();
+          this.robot.setPartUpAxis(this.selectedPartIndex, e.target.value);
+        }
+      });
+    }
+
+    const rotAxisSelect = document.getElementById('insp-rot-axis');
+    if (rotAxisSelect) {
+      rotAxisSelect.addEventListener('change', (e) => {
+        if (this.selectedTargetType === 'robot_link' && this.selectedPartIndex > 0) {
+          this.pushUndoState();
+          const idx = this.selectedPartIndex;
+          this.robot.linkOffsets[idx].rot_axis = e.target.value;
+          if (this.robot.dhTable[idx - 1]) {
+            this.robot.dhTable[idx - 1].rot_axis = e.target.value;
+            this.renderDHEditorTable();
+          }
+          // Re-anchor world_abs parts cleanly and update without scrambling positions
+          this.robot.applyLinkOffsets();
+          this.robot.setJointAngles(this.robot.joints);
+          this.renderPartTreeList();
+        }
+      });
+    }
+
     document.getElementById('btn-insp-snap-origin').onclick = () => {
+      this.pushUndoState();
       document.getElementById('insp-pos-x').value = 0;
       document.getElementById('insp-pos-y').value = 0;
       document.getElementById('insp-pos-z').value = 0;
@@ -426,6 +626,7 @@ class AppController {
     if (btnSnapDh) {
       btnSnapDh.onclick = () => {
         if (this.selectedTargetType === 'robot_link' && this.selectedPartIndex >= 0) {
+          this.pushUndoState();
           this.robot.snapPartToDHJoint(this.selectedPartIndex);
           this.populateInspectorForPart(this.selectedPartIndex);
         }
@@ -598,21 +799,35 @@ class AppController {
     if (!tbody) return;
     tbody.innerHTML = '';
 
+    const defaultAxes = ["z", "y", "y", "z", "y", "z"];
     this.robot.dhTable.forEach((row, i) => {
+      const axis = (row.rot_axis || defaultAxes[i]).toLowerCase();
       const tr = document.createElement('tr');
       tr.innerHTML = `
         <td style="font-weight: 700; color: #38bdf8;">J${i + 1}</td>
-        <td><input type="number" class="dh-input" id="dh-a-${i}" value="${row.a}" step="1"></td>
+        <td>
+          <select class="dh-input" id="dh-axis-${i}" style="width: 40px; text-align: center; font-weight: 700; color: #ffd740;">
+            <option value="x" ${axis === 'x' ? 'selected' : ''}>X</option>
+            <option value="y" ${axis === 'y' ? 'selected' : ''}>Y</option>
+            <option value="z" ${axis === 'z' ? 'selected' : ''}>Z</option>
+          </select>
+        </td>
+        <td><input type="number" class="dh-input" id="dh-a-${i}" value="${row.a}" step="0.5"></td>
         <td><input type="number" class="dh-input" id="dh-alpha-${i}" value="${row.alpha_deg}" step="1"></td>
-        <td><input type="number" class="dh-input" id="dh-d-${i}" value="${row.d}" step="1"></td>
+        <td><input type="number" class="dh-input" id="dh-d-${i}" value="${row.d}" step="0.5"></td>
         <td><input type="number" class="dh-input" id="dh-off-${i}" value="${row.offset_deg}" step="1"></td>
         <td><input type="number" class="dh-input" id="dh-min-${i}" value="${row.min_deg}" step="5"></td>
         <td><input type="number" class="dh-input" id="dh-max-${i}" value="${row.max_deg}" step="5"></td>
       `;
       tbody.appendChild(tr);
 
-      tr.querySelectorAll('input').forEach(inp => {
+      tr.querySelectorAll('input, select').forEach(inp => {
         inp.addEventListener('input', () => {
+          if (inp.tagName !== 'SELECT') {
+            this.robot.dhTable[i].jx = 0;
+            this.robot.dhTable[i].jy = 0;
+            this.robot.dhTable[i].jz = 0;
+          }
           this.applyDHFromTableUI(false);
         });
       });
@@ -620,14 +835,19 @@ class AppController {
   }
 
   collectDHFromTableUI() {
+    const defaultAxes = ["z", "y", "y", "z", "y", "z"];
     return this.robot.dhTable.map((row, i) => ({
       ...row,
+      rot_axis: document.getElementById(`dh-axis-${i}`)?.value || row.rot_axis || defaultAxes[i],
       a: parseFloat(document.getElementById(`dh-a-${i}`)?.value) || 0,
       alpha_deg: parseFloat(document.getElementById(`dh-alpha-${i}`)?.value) || 0,
       d: parseFloat(document.getElementById(`dh-d-${i}`)?.value) || 0,
       offset_deg: parseFloat(document.getElementById(`dh-off-${i}`)?.value) || 0,
       min_deg: parseFloat(document.getElementById(`dh-min-${i}`)?.value ?? row.min_deg),
-      max_deg: parseFloat(document.getElementById(`dh-max-${i}`)?.value ?? row.max_deg)
+      max_deg: parseFloat(document.getElementById(`dh-max-${i}`)?.value ?? row.max_deg),
+      jx: parseFloat(row.jx) || 0,
+      jy: parseFloat(row.jy) || 0,
+      jz: parseFloat(row.jz) || 0
     }));
   }
 
@@ -661,6 +881,31 @@ class AppController {
     if (chkDhAxes) {
       chkDhAxes.onchange = (e) => {
         this.robot.setDHJointAxesVisible(e.target.checked);
+      };
+    }
+
+    const btnAutoDh = document.getElementById('btn-auto-dh-from-parts');
+    if (btnAutoDh) {
+      btnAutoDh.onclick = async () => {
+        this.pushUndoState();
+        this.robot.autoSetDHFromPartOrigins();
+        this.renderDHEditorTable();
+        this.setupFKSliders();
+        this.syncFromJoints(this.robot.joints);
+        await fetch('/api/dh_config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            dh_table: this.robot.dhTable,
+            link_offsets: this.robot.linkOffsets,
+            tcp_offset: this.robot.tcpOffset,
+            save_to_disk: true
+          })
+        });
+        this.robot.setDHJointAxesVisible(true);
+        const chkDhAxes = document.getElementById('chk-show-dh-axes');
+        if (chkDhAxes) chkDhAxes.checked = true;
+        this.updateHUDStatus('✅ Đã Auto Set Bảng DH & Tâm Khớp theo Gốc Riêng của từng Part!', 'normal');
       };
     }
 
@@ -806,6 +1051,45 @@ class AppController {
     document.getElementById('btn-cam-front').onclick = () => this.viewport.setCameraView('front');
     const btnRight = document.getElementById('btn-cam-right');
     if (btnRight) btnRight.onclick = () => this.viewport.setCameraView('right');
+
+    // Measure Tool UI
+    const btnMeasure = document.getElementById('btn-measure-tool');
+    const measureBox = document.getElementById('measure-readout');
+    const measureText = document.getElementById('measure-result-text');
+    const btnMeasureClear = document.getElementById('btn-measure-clear');
+
+    if (btnMeasure && measureBox) {
+      btnMeasure.onclick = () => {
+        const nextState = !this.viewport.measureMode;
+        this.viewport.setMeasureMode(nextState);
+        btnMeasure.classList.toggle('active', nextState);
+        measureBox.style.display = nextState ? 'block' : 'none';
+        if (nextState) {
+          measureText.innerHTML = 'Hãy click điểm thứ 1 trên bề mặt mô hình 3D...';
+        }
+      };
+    }
+
+    if (btnMeasureClear) {
+      btnMeasureClear.onclick = () => {
+        this.viewport.clearMeasurePoints();
+        if (measureText) measureText.innerHTML = 'Đã xóa. Click điểm thứ 1 để đo mới...';
+      };
+    }
+
+    this.viewport.onMeasureUpdate = (info) => {
+      if (!measureText) return;
+      if (!info) {
+        measureText.innerHTML = 'Hãy click điểm thứ 1 trên bề mặt mô hình 3D...';
+      } else if (!info.p2) {
+        measureText.innerHTML = `Điểm 1: (${info.p1.x.toFixed(1)}, ${info.p1.y.toFixed(1)}, ${info.p1.z.toFixed(1)}) mm<br><span style="color:#ffeb3b;">👉 Click tiếp điểm thứ 2 để đo...</span>`;
+      } else {
+        measureText.innerHTML = `
+          <div style="font-size:13px; font-weight:700; color:#00e676; margin-bottom:2px;">📏 Khoảng cách: ${info.distance} mm</div>
+          <div>ΔX: <b style="color:#ff5252;">${info.dx}</b> mm | ΔY: <b style="color:#69f0ae;">${info.dy}</b> mm | ΔZ: <b style="color:#40c4ff;">${info.dz}</b> mm</div>
+        `;
+      }
+    };
   }
 
   syncFromJoints(newJoints) {
@@ -855,10 +1139,10 @@ class AppController {
         const deg = (r) => Math.round(THREE.MathUtils.radToDeg(r) * 10) / 10;
         const rnd = (v) => Math.round(v * 10) / 10;
         document.getElementById('insp-pos-x').value = rnd(obj.mesh.position.x);
-        document.getElementById('insp-pos-y').value = rnd(obj.mesh.position.z);
+        document.getElementById('insp-pos-y').value = rnd(-obj.mesh.position.z);
         document.getElementById('insp-pos-z').value = rnd(obj.mesh.position.y);
         document.getElementById('insp-rot-x').value = deg(obj.mesh.rotation.x);
-        document.getElementById('insp-rot-y').value = deg(obj.mesh.rotation.z);
+        document.getElementById('insp-rot-y').value = deg(-obj.mesh.rotation.z);
         document.getElementById('insp-rot-z').value = deg(obj.mesh.rotation.y);
       }
       return;

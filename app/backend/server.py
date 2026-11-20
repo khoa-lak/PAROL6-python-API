@@ -32,6 +32,7 @@ from .kinematics.dh_parol6 import (
 from .kinematics.forward import forward_kinematics
 from .kinematics.inverse import inverse_kinematics
 from .kinematics.trajectory import plan_move_j, plan_move_l
+from .kinematics.collision_planner import plan_collision_free_joint_path
 from .communication.serial_manager import serial_manager
 from .postprocessor.gcode_exporter import export_to_gcode, export_to_stm32_stream
 
@@ -44,6 +45,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def disable_static_cache(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path == "/" or request.url.path.endswith((".html", ".js", ".css")):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+    return response
 
 # ----------------- Persistent Multi-Model Robot Storage ----------------- #
 APP_DIR = Path(__file__).resolve().parent.parent
@@ -172,7 +182,8 @@ def _load_model_into_runtime(model_id: str) -> dict:
         "link_offsets": get_link_offsets(),
         "joint_limits": dh_parol6.JOINT_LIMITS_DEG,
         "saved_stls": saved_stls,
-        "tcp_offset": data.get("tcp_offset", {"x": 0, "y": 0, "z": 65, "roll": 0, "pitch": 0, "yaw": 0})
+        "tcp_offset": data.get("tcp_offset", {"x": 0, "y": 0, "z": 65, "roll": 0, "pitch": 0, "yaw": 0}),
+        "workcell_objects": data.get("workcell_objects", [])
     }
 
 
@@ -197,7 +208,8 @@ def _save_active_model_to_disk(extra_data: dict = None, model_id: str = None, mo
         "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "dh_table": get_dh_table_deg(),
         "link_offsets": get_link_offsets(),
-        "tcp_offset": existing.get("tcp_offset", {"x": 0, "y": 0, "z": 65, "roll": 0, "pitch": 0, "yaw": 0})
+        "tcp_offset": existing.get("tcp_offset", {"x": 0, "y": 0, "z": 65, "roll": 0, "pitch": 0, "yaw": 0}),
+        "workcell_objects": existing.get("workcell_objects", [])
     }
     if extra_data:
         meta.update(extra_data)
@@ -305,6 +317,31 @@ def export_gcode_endpoint(req: ExportRequest):
     return {"gcode": gcode}
 
 
+class AvoidanceRequest(BaseModel):
+    start_joints: list[float]
+    goal_joints: list[float]
+    obstacles: list[dict]
+    dh_table: list[dict] | None = None
+    tcp_offset: list[float] | None = None
+    safety_margin_mm: float = 15.0
+    link_radii: list[float] | None = None
+
+
+@app.post("/api/plan_avoidance")
+def plan_avoidance_endpoint(req: AvoidanceRequest):
+    dh = req.dh_table if req.dh_table else get_dh_table_deg()
+    res = plan_collision_free_joint_path(
+        req.start_joints,
+        req.goal_joints,
+        dh,
+        req.obstacles,
+        req.tcp_offset,
+        req.safety_margin_mm,
+        link_radii=req.link_radii
+    )
+    return res
+
+
 @app.get("/api/robot_info")
 def get_robot_info():
     return {
@@ -353,6 +390,7 @@ class SaveModelRequest(BaseModel):
     link_offsets: list[dict]
     tcp_offset: dict | None = None
     copy_stls_from_active: bool = True
+    workcell_objects: list[dict] | None = None
 
 
 @app.post("/api/models/save")
@@ -376,8 +414,12 @@ def save_robot_model(req: SaveModelRequest):
 
     set_dh_table_deg(req.dh_table)
     set_link_offsets(req.link_offsets)
-    extra = {"tcp_offset": req.tcp_offset} if req.tcp_offset else None
-    _save_active_model_to_disk(extra_data=extra, model_id=target_id, model_name=req.model_name)
+    extra = {}
+    if req.tcp_offset is not None:
+        extra["tcp_offset"] = req.tcp_offset
+    if req.workcell_objects is not None:
+        extra["workcell_objects"] = req.workcell_objects
+    _save_active_model_to_disk(extra_data=extra or None, model_id=target_id, model_name=req.model_name)
 
     profile = _load_model_into_runtime(target_id)
     return {"success": True, **profile}
@@ -400,6 +442,7 @@ async def upload_model_stl(model_id: str, link_index: int, request: Request, fil
 
     offsets = get_link_offsets()
     offsets[link_index]["stl_file"] = filename or f"link_{link_index}.stl"
+    offsets[link_index]["deleted"] = False
     set_link_offsets(offsets)
     _save_active_model_to_disk(model_id=model_id)
 
@@ -421,24 +464,86 @@ def get_model_stl(model_id: str, link_index: int):
     return FileResponse(str(stl_path), media_type="application/sla", filename=f"link_{link_index}.stl")
 
 
+@app.delete("/api/models/{model_id}/stl/{link_index}")
+def delete_single_model_part(model_id: str, link_index: int):
+    """Deletes a single Part (both its saved STL file on disk and hides/removes its 3D block)."""
+    if link_index < 0 or link_index > 6:
+        return {"success": False, "error": "Invalid link index (0..6)"}
+    stl_path = MODELS_DIR / model_id / "stls" / f"link_{link_index}.stl"
+    if stl_path.exists():
+        try:
+            stl_path.unlink()
+        except Exception:
+            pass
+    # Also remove legacy STL if present
+    leg_stl = LEGACY_STL_DIR / f"link_{link_index}.stl"
+    if leg_stl.exists():
+        try:
+            leg_stl.unlink()
+        except Exception:
+            pass
+
+    offsets = get_link_offsets()
+    offsets[link_index]["stl_file"] = None
+    offsets[link_index]["deleted"] = True
+    offsets[link_index]["dx"] = 0.0
+    offsets[link_index]["dy"] = 0.0
+    offsets[link_index]["dz"] = 0.0
+    offsets[link_index]["rx"] = 0.0
+    offsets[link_index]["ry"] = 0.0
+    offsets[link_index]["rz"] = 0.0
+    offsets[link_index]["scale"] = 1.0
+    set_link_offsets(offsets)
+    _save_active_model_to_disk(model_id=model_id)
+    return {"success": True, **_load_model_into_runtime(model_id)}
+
+
+@app.post("/api/models/{model_id}/clear_all")
+def clear_all_model_parts(model_id: str):
+    """Deletes all pre-existing 3D blocks and imported STL files in the model, leaving a blank 3D workspace."""
+    stl_dir = MODELS_DIR / model_id / "stls"
+    if stl_dir.exists():
+        shutil.rmtree(stl_dir, ignore_errors=True)
+        stl_dir.mkdir(parents=True, exist_ok=True)
+    if LEGACY_STL_DIR.exists():
+        shutil.rmtree(LEGACY_STL_DIR, ignore_errors=True)
+
+    offsets = reset_link_offsets()
+    for i in range(7):
+        offsets[i]["deleted"] = True
+        offsets[i]["stl_file"] = None
+    set_link_offsets(offsets)
+    _save_active_model_to_disk(model_id=model_id)
+    return {"success": True, **_load_model_into_runtime(model_id)}
+
+
+@app.post("/api/models/{model_id}/restore_defaults")
+def restore_default_model_blocks(model_id: str):
+    """Restores the 7 sample PAROL6 3D blocks."""
+    offsets = get_link_offsets()
+    for i in range(7):
+        offsets[i]["deleted"] = False
+    set_link_offsets(offsets)
+    _save_active_model_to_disk(model_id=model_id)
+    return {"success": True, **_load_model_into_runtime(model_id)}
+
+
 @app.delete("/api/models/{model_id}")
 def delete_robot_model(model_id: str):
-    if model_id == "parol6_default":
-        # For default model, just clear its custom STLs and reset DH
-        stl_dir = MODELS_DIR / "parol6_default" / "stls"
-        if stl_dir.exists():
-            shutil.rmtree(stl_dir, ignore_errors=True)
-            stl_dir.mkdir(exist_ok=True)
-        reset_dh_table_deg()
-        reset_link_offsets()
-        _save_active_model_to_disk(model_id="parol6_default", model_name="PAROL6 Mặc Định (Chuẩn)")
-        return {"success": True, **_load_model_into_runtime("parol6_default")}
+    other_models = [
+        d.name for d in sorted(MODELS_DIR.iterdir())
+        if d.is_dir() and (d / "model.json").exists() and d.name != model_id
+    ]
+    if not other_models:
+        # If deleting the only remaining model (e.g. parol6_default), clear all its parts & STLs so 3D view is empty!
+        return clear_all_model_parts(model_id)
 
     target_dir = MODELS_DIR / model_id
     if target_dir.exists():
         shutil.rmtree(target_dir, ignore_errors=True)
 
-    profile = _load_model_into_runtime("parol6_default")
+    next_model_id = other_models[0]
+    profile = _load_model_into_runtime(next_model_id)
     return {"success": True, **profile}
 
 
@@ -468,7 +573,8 @@ def export_model_bundle(model_id: str):
         "dh_table": meta.get("dh_table", get_dh_table_deg()),
         "link_offsets": meta.get("link_offsets", get_link_offsets()),
         "tcp_offset": meta.get("tcp_offset", {"x": 0, "y": 0, "z": 65, "roll": 0, "pitch": 0, "yaw": 0}),
-        "stls_base64": stls_b64
+        "stls_base64": stls_b64,
+        "workcell_objects": meta.get("workcell_objects", [])
     }
     return JSONResponse(content=bundle)
 
@@ -503,7 +609,10 @@ async def import_model_bundle(request: Request):
     set_dh_table_deg(dh_table)
     set_link_offsets(link_offsets)
     _save_active_model_to_disk(
-        extra_data={"tcp_offset": tcp_offset},
+        extra_data={
+            "tcp_offset": tcp_offset,
+            "workcell_objects": body.get("workcell_objects", [])
+        },
         model_id=model_id,
         model_name=model_name
     )
@@ -526,6 +635,7 @@ class DHUpdateRequest(BaseModel):
     save_to_disk: bool = True
     model_id: str | None = None
     model_name: str | None = None
+    workcell_objects: list[dict] | None = None
 
 
 @app.post("/api/dh_config")
@@ -534,8 +644,12 @@ def update_dh_config(req: DHUpdateRequest):
     if req.link_offsets is not None:
         set_link_offsets(req.link_offsets)
     if req.save_to_disk:
-        extra = {"tcp_offset": req.tcp_offset} if req.tcp_offset else None
-        _save_active_model_to_disk(extra_data=extra, model_id=req.model_id, model_name=req.model_name)
+        extra = {}
+        if req.tcp_offset is not None:
+            extra["tcp_offset"] = req.tcp_offset
+        if req.workcell_objects is not None:
+            extra["workcell_objects"] = req.workcell_objects
+        _save_active_model_to_disk(extra_data=extra or None, model_id=req.model_id, model_name=req.model_name)
     return {
         "success": True,
         "model_id": _get_active_model_id(),

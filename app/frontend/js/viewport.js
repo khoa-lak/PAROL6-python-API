@@ -1,9 +1,13 @@
 /**
  * 3D Viewport Module using Three.js (PAROL6-python-API/app)
- * Includes:
+ * Features:
+ * - Right-Handed Robotics Z-up Coordinate Mapping:
+ *     Three.js +X = Robotics +X (Đỏ)
+ *     Three.js -Z = Robotics +Y (Xanh lá)
+ *     Three.js +Y = Robotics +Z (Xanh dương - hướng lên)
  * - Fixed Reference Origin (Gốc Cố Định 0,0,0) always visible
  * - 3D Raycaster for clicking any Robot Part or Workcell Object directly in 3D View
- * - OrbitControls + TransformControls (Gizmo)
+ * - Interactive 2-Point 3D Measure Tool (📏 Đo Kích Thước)
  */
 class Viewport3D {
   constructor(canvasId) {
@@ -32,8 +36,16 @@ class Viewport3D {
     this.raycaster = new THREE.Raycaster();
     this.pointerDownPos = new THREE.Vector2();
     this.isGizmoDragging = false;
-    this.pickableRoot = null;
+    this.pickableObjects = [];
     this.onPartSelected3D = null;
+
+    // Measure Tool State
+    this.measureMode = false;
+    this.measurePoints = [];
+    this.measureGroup = new THREE.Group();
+    this.measureGroup.name = "Measure_Overlay";
+    this.scene.add(this.measureGroup);
+    this.onMeasureUpdate = null;
 
     this.setupLighting();
     this.setupFixedReferenceOrigin();
@@ -71,8 +83,10 @@ class Viewport3D {
 
   /**
    * GỐC TỌA ĐỘ 1: Gốc Cố Định (Fixed Reference Origin 0,0,0)
-   * Luôn hiển thị cố định tại tâm bàn máy (0,0,0) để làm chuẩn tham chiếu.
-   * Quy ước màu Robotics: Trục X (Đỏ), Trục Y (Xanh lá), Trục Z (Xanh dương - hướng lên)
+   * Hệ trục bàn tay phải (Right-Handed CAD Z-up):
+   *   X (Đỏ) = +X_three
+   *   Y (Xanh lá) = -Z_three
+   *   Z (Xanh dương - hướng lên) = +Y_three
    */
   setupFixedReferenceOrigin() {
     const gridHelper = new THREE.GridHelper(1200, 24, 0x1e293b, 0x151d2a);
@@ -86,7 +100,6 @@ class Viewport3D {
     const headLen = 18;
     const headWidth = 8;
 
-    // X Axis (Red) -> Three.js +X
     const arrowX = new THREE.ArrowHelper(
       new THREE.Vector3(1, 0, 0),
       new THREE.Vector3(0, 0, 0),
@@ -95,16 +108,14 @@ class Viewport3D {
       headLen,
       headWidth
     );
-    // Y Axis (Green) -> Three.js +Z
     const arrowY = new THREE.ArrowHelper(
-      new THREE.Vector3(0, 0, 1),
+      new THREE.Vector3(0, 0, -1),
       new THREE.Vector3(0, 0, 0),
       axisLen,
       0x00e676,
       headLen,
       headWidth
     );
-    // Z Axis (Blue - Vertical Up) -> Three.js +Y
     const arrowZ = new THREE.ArrowHelper(
       new THREE.Vector3(0, 1, 0),
       new THREE.Vector3(0, 0, 0),
@@ -114,7 +125,6 @@ class Viewport3D {
       headWidth
     );
 
-    // Center Reference Sphere & Ring at (0,0,0)
     const originSphere = new THREE.Mesh(
       new THREE.SphereGeometry(5, 16, 16),
       new THREE.MeshBasicMaterial({ color: 0xffffff })
@@ -135,6 +145,28 @@ class Viewport3D {
     this.gizmo.setSize(0.75);
     this.gizmo.setSpace('world');
 
+    // Unify Gizmo axis colors to match Robotics Z-up convention:
+    //   Three.js X -> Red (Robotics X)
+    //   Three.js Y (Up) -> Blue (Robotics Z)
+    //   Three.js Z -> Green (Robotics Y)
+    this.gizmo.traverse((obj) => {
+      if (!obj.material) return;
+      const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+      mats.forEach((mat) => {
+        if (!mat || !mat.color) return;
+        if (obj.name === 'Y') {
+          mat.color.setHex(0x00b0ff);
+          if (mat._color) mat._color.setHex(0x00b0ff);
+        } else if (obj.name === 'Z') {
+          mat.color.setHex(0x00e676);
+          if (mat._color) mat._color.setHex(0x00e676);
+        } else if (obj.name === 'X') {
+          mat.color.setHex(0xff2e4c);
+          if (mat._color) mat._color.setHex(0xff2e4c);
+        }
+      });
+    });
+
     this.gizmo.addEventListener('dragging-changed', (event) => {
       this.isGizmoDragging = event.value;
       this.controls.enabled = !event.value;
@@ -152,6 +184,74 @@ class Viewport3D {
     this.scene.add(this.gizmo);
   }
 
+  /* --------- Measure Tool (📏 Đo Khoảng Cách & Kích Thước 3D) --------- */
+  setMeasureMode(enabled) {
+    this.measureMode = !!enabled;
+    this.canvas.style.cursor = this.measureMode ? 'crosshair' : 'default';
+    if (!this.measureMode) {
+      this.clearMeasurePoints();
+    }
+  }
+
+  clearMeasurePoints() {
+    this.measurePoints = [];
+    while (this.measureGroup.children.length > 0) {
+      this.measureGroup.remove(this.measureGroup.children[0]);
+    }
+    if (this.onMeasureUpdate) {
+      this.onMeasureUpdate(null);
+    }
+  }
+
+  addMeasurePoint(worldVec3) {
+    if (this.measurePoints.length >= 2) {
+      this.clearMeasurePoints();
+    }
+    this.measurePoints.push(worldVec3.clone());
+
+    const marker = new THREE.Mesh(
+      new THREE.SphereGeometry(4, 16, 16),
+      new THREE.MeshBasicMaterial({ color: 0xffeb3b, depthTest: false })
+    );
+    marker.renderOrder = 999;
+    marker.position.copy(worldVec3);
+    this.measureGroup.add(marker);
+
+    if (this.measurePoints.length === 2) {
+      const p1 = this.measurePoints[0];
+      const p2 = this.measurePoints[1];
+
+      const lineGeo = new THREE.BufferGeometry().setFromPoints([p1, p2]);
+      const lineMat = new THREE.LineBasicMaterial({ color: 0xffeb3b, linewidth: 2, depthTest: false });
+      const line = new THREE.Line(lineGeo, lineMat);
+      line.renderOrder = 999;
+      this.measureGroup.add(line);
+
+      // Convert Three.js (X, Y_up, -Z) -> Robotics (X, Y, Z)
+      const toRob = (v) => ({ x: v.x, y: -v.z, z: v.y });
+      const r1 = toRob(p1);
+      const r2 = toRob(p2);
+      const dx = r2.x - r1.x;
+      const dy = r2.y - r1.y;
+      const dz = r2.z - r1.z;
+      const dist = Math.hypot(dx, dy, dz);
+
+      if (this.onMeasureUpdate) {
+        this.onMeasureUpdate({
+          p1: r1,
+          p2: r2,
+          dx: Math.round(dx * 100) / 100,
+          dy: Math.round(dy * 100) / 100,
+          dz: Math.round(dz * 100) / 100,
+          distance: Math.round(dist * 100) / 100
+        });
+      }
+    } else if (this.onMeasureUpdate) {
+      const r1 = { x: worldVec3.x, y: -worldVec3.z, z: worldVec3.y };
+      this.onMeasureUpdate({ p1: r1, p2: null, distance: 0 });
+    }
+  }
+
   setupRaycasterEvents() {
     this.canvas.addEventListener('pointerdown', (e) => {
       if (e.button !== 0) return;
@@ -162,7 +262,6 @@ class Viewport3D {
       if (e.button !== 0 || this.isGizmoDragging) return;
       const dx = e.clientX - this.pointerDownPos.x;
       const dy = e.clientY - this.pointerDownPos.y;
-      // Ignore if the user dragged the camera (distance > 5px)
       if (Math.hypot(dx, dy) > 5) return;
 
       const rect = this.canvas.getBoundingClientRect();
@@ -176,8 +275,24 @@ class Viewport3D {
       if (!this.pickableObjects || this.pickableObjects.length === 0) return;
       const intersects = this.raycaster.intersectObjects(this.pickableObjects, true);
 
+      if (this.measureMode) {
+        // Filter out gizmo / helper lines, pick first real mesh surface hit
+        for (const hit of intersects) {
+          if (hit.object && hit.object.isMesh) {
+            this.addMeasurePoint(hit.point);
+            return;
+          }
+        }
+        // Fallback: intersect ground plane Z=0
+        const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+        const target = new THREE.Vector3();
+        if (this.raycaster.ray.intersectPlane(plane, target)) {
+          this.addMeasurePoint(target);
+        }
+        return;
+      }
+
       for (const hit of intersects) {
-        // Walk up parent hierarchy to find a tagged Robot Link or Workcell Mesh
         let cur = hit.object;
         while (cur) {
           if (cur.userData && cur.userData.linkIndex !== undefined) {
@@ -196,7 +311,6 @@ class Viewport3D {
         }
       }
 
-      // Clicked empty space -> deselect
       if (this.onPartSelected3D) {
         this.onPartSelected3D(null);
       }

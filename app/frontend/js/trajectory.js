@@ -28,6 +28,10 @@ class TrajectoryManager {
     document.getElementById('btn-play-sim').onclick = () => this.toggleSimulation();
     document.getElementById('btn-export-gcode').onclick = () => this.exportGCodeFile();
     document.getElementById('btn-stream-usb').onclick = () => this.streamToUSB();
+    const btnAvoid = document.getElementById('btn-auto-avoid');
+    if (btnAvoid) {
+      btnAvoid.onclick = () => this.autoAvoidObstacles();
+    }
   }
 
   addWaypoint(type) {
@@ -224,6 +228,121 @@ class TrajectoryManager {
       }
     } catch (e) {
       alert("Lỗi kết nối API: " + e.message);
+    }
+  }
+
+  async autoAvoidObstacles() {
+    const obstacles = window.stlManager ? window.stlManager.getWorkcellObstaclesAABB() : [];
+    if (obstacles.length === 0) {
+      alert("Bạn chưa import vật thể (Workcell STL) nào để né! Hãy bấm '+ Thêm STL' ở mục Vật Thể Môi Trường.");
+      return;
+    }
+
+    const motionIndices = [];
+    this.waypoints.forEach((wp, idx) => {
+      if (wp.joints) motionIndices.push(idx);
+    });
+    if (motionIndices.length < 2) {
+      alert("Cần ít nhất 2 điểm MoveJ/MoveL trong kịch bản để tính đường né vật cản!");
+      return;
+    }
+
+    const tcpOff = [
+      this.robot.tcpOffset.x, this.robot.tcpOffset.y, this.robot.tcpOffset.z,
+      this.robot.tcpOffset.roll, this.robot.tcpOffset.pitch, this.robot.tcpOffset.yaw
+    ];
+
+    // Estimate each robot link's cross-section radius from its loaded STL bounds (use smallest dim, capped sensibly)
+    const linkRadii = [36, 36, 32, 30, 28, 26, 24];
+    for (let li = 0; li <= 6; li++) {
+      const b = this.robot.stlBounds?.[li];
+      if (b) {
+        const sc = this.robot.linkOffsets?.[li]?.scale || 1.0;
+        const dims = [b.width * sc, b.depth * sc, b.height * sc].sort((a, c) => a - c);
+        linkRadii[li] = Math.min(48, Math.max(24, Math.round(dims[0] * 0.45)));
+      }
+    }
+
+    const btnAvoid = document.getElementById('btn-auto-avoid');
+    const origBtnText = btnAvoid ? btnAvoid.innerText : '';
+    if (btnAvoid) {
+      btnAvoid.disabled = true;
+      btnAvoid.innerText = '⏳ Đang quét & né...';
+    }
+
+    try {
+      const newWaypoints = [];
+      let addedAvoidPoints = 0;
+
+      for (let i = 0; i < this.waypoints.length; i++) {
+        const wp = this.waypoints[i];
+        newWaypoints.push(wp);
+
+        // Find next motion waypoint
+        if (!wp.joints) continue;
+        let nextMotionIdx = -1;
+        for (let k = i + 1; k < this.waypoints.length; k++) {
+          if (this.waypoints[k].joints) {
+            nextMotionIdx = k;
+            break;
+          }
+        }
+        if (nextMotionIdx === -1) continue;
+
+        const wpNext = this.waypoints[nextMotionIdx];
+        const res = await fetch('/api/plan_avoidance', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            start_joints: wp.joints,
+            goal_joints: wpNext.joints,
+            obstacles: obstacles,
+            dh_table: this.robot.dhTable,
+            tcp_offset: tcpOff,
+            safety_margin_mm: 15.0,
+            link_radii: linkRadii
+          })
+        });
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+        const data = await res.json();
+        if (!data.success) {
+          alert(`⚠️ Đoạn #${i + 1} → #${nextMotionIdx + 1}: ${data.message}`);
+          return;
+        }
+        if (!data.direct_clear && data.path && data.path.length > 2) {
+          // Insert intermediate avoidance MoveJ waypoints
+          for (let p = 1; p < data.path.length - 1; p++) {
+            addedAvoidPoints++;
+            newWaypoints.push({
+              id: Date.now() + addedAvoidPoints,
+              type: 'MoveJ',
+              joints: data.path[p],
+              cartesian: { x: 0, y: 0, z: 0 },
+              orientation: { roll: 0, pitch: 0, yaw: 0 },
+              speed: 1000,
+              note: 'Né vật cản'
+            });
+          }
+        }
+      }
+
+      const obsNames = obstacles.map(o => o.name).join(', ');
+      if (addedAvoidPoints > 0) {
+        this.waypoints = newWaypoints;
+        this.updateListUI();
+        alert(`✅ Đã quét toàn bộ ${obstacles.length} vật thể (${obsNames}) và tự động sinh thêm ${addedAvoidPoints} điểm MoveJ trung gian né an toàn!`);
+      } else {
+        alert(`✅ Đã quét toàn bộ ${obstacles.length} vật thể (${obsNames}): đường đi hiện tại thông thoáng, không va chạm!`);
+      }
+    } catch (err) {
+      alert("Lỗi khi tính toán né vật cản: " + err.message);
+    } finally {
+      if (btnAvoid) {
+        btnAvoid.disabled = false;
+        btnAvoid.innerText = origBtnText || '🛡️ Né Vật Cản';
+      }
     }
   }
 }

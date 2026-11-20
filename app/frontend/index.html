@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>PAROL6 3D OLP Studio</title>
-  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/style.css?v=2.3">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/TransformControls.js"></script>
@@ -38,6 +38,9 @@
             <button id="menu-import-part-stl">📥 Import STL Vào Part Đang Chọn...</button>
             <button id="menu-import-workcell">📦 Import Vật Thể Môi Trường (Workcell STL)...</button>
             <div class="menu-divider"></div>
+            <button id="menu-clear-all-3d" style="color: #f87171;">🧹 Xóa Trắng Màn Hình 3D (Xóa hết Model/STL)</button>
+            <button id="menu-restore-default-blocks">🔄 Khôi Phục Khối 3D Mẫu PAROL6</button>
+            <div class="menu-divider"></div>
             <button id="menu-export-gcode">📤 Xuất Chương Trình G-code (.gcode)</button>
           </div>
         </div>
@@ -46,12 +49,16 @@
         <button id="btn-quick-open" class="btn-toolbar" title="Mở file Model Cánh Tay (.robot.json)">📂 Mở File</button>
         <button id="btn-quick-save" class="btn-toolbar" title="Lưu Model Cánh Tay hiện tại">💾 Lưu</button>
         <button id="btn-quick-save-as" class="btn-toolbar" title="Lưu thành tên Model mới">💾 Lưu Mới...</button>
+        <button id="btn-quick-undo" class="btn-toolbar" title="Hoàn tác thao tác vừa rồi (Ctrl+Z)">↩ Hoàn Tác</button>
 
         <div class="model-selector-box" title="Chọn Model Cánh Tay trong thư viện để lấy toàn bộ cơ cấu vào">
           <span>Model:</span>
           <select id="robot-model-select">
             <option value="parol6_default">PAROL6 Mặc Định</option>
           </select>
+          <button id="btn-header-delete-model" class="btn btn-danger" style="padding: 2px 6px; font-size: 10px;" title="Xóa Model đang chọn (Làm trống màn hình 3D)">
+            🗑 Xóa Model
+          </button>
         </div>
       </div>
     </div>
@@ -102,11 +109,19 @@
         <!-- ========================================================= -->
         <div id="ws-pane-assembly" class="ws-pane active">
           <div class="section-card">
-            <div class="section-title">
+            <div class="section-title" style="flex-wrap: wrap; gap: 4px;">
               <span>🤖 Cấu Trúc Các Part Cánh Tay</span>
+              <div style="display: flex; gap: 4px;">
+                <button id="btn-restore-default-parts" class="btn" style="padding: 2px 6px; font-size: 10px;" title="Hiện lại 7 khối 3D mẫu của PAROL6">
+                  🔄 Khối Mẫu
+                </button>
+                <button id="btn-clear-all-parts" class="btn btn-danger" style="padding: 2px 6px; font-size: 10px;" title="Xóa sạch toàn bộ khối có sẵn & STL trên màn hình 3D">
+                  🧹 Xóa Hết 3D
+                </button>
+              </div>
             </div>
             <p style="font-size: 11px; color: var(--text-dim); margin-bottom: 8px; line-height: 1.4;">
-              Nhấp chuột trực tiếp vào <b>bất kỳ Part nào trên màn hình 3D</b> (hoặc chọn trong danh sách dưới đây) để hiện <b>Gốc tọa độ riêng của Part</b> và nhập vị trí <b>X, Y, Z, Góc quay</b> khớp vào <b>Gốc Cố Định (0,0,0)</b>.
+              Bấm <b>🗑 Xóa</b> ở từng dòng (hoặc <b>🧹 Xóa Hết 3D</b>) để xóa các khối có sẵn / file STL đã nạp. Nhấp vào Part trên 3D để chỉnh <b>X, Y, Z, Góc quay</b>.
             </p>
             <div class="part-tree-list" id="part-tree-list"></div>
           </div>
@@ -153,18 +168,24 @@
         <!-- ========================================================= -->
         <div id="ws-pane-dh" class="ws-pane" style="display: none;">
           <div class="section-card">
-            <div class="section-title">
+            <div class="section-title" style="flex-wrap: wrap; gap: 6px;">
               <span>📐 Bảng Động Học Denavit-Hartenberg (DH)</span>
-              <button id="btn-reset-dh" class="btn" style="padding: 2px 6px; font-size: 10px;">🔄 Mặc Định</button>
+              <div style="display: flex; gap: 4px;">
+                <button id="btn-auto-dh-from-parts" class="btn btn-success" style="padding: 2px 7px; font-size: 10px;" title="Tự động tính bảng DH & đặt tâm khớp quay J1..J6 trùng vào Gốc Riêng (🟡) của từng Part">
+                  🤖 Auto Set Theo Gốc Part
+                </button>
+                <button id="btn-reset-dh" class="btn" style="padding: 2px 6px; font-size: 10px;">🔄 Mặc Định</button>
+              </div>
             </div>
             <p style="font-size: 11px; color: var(--text-dim); margin-bottom: 8px;">
-              Thiết lập thông số cơ cấu động học <b>a, α, d, θ₀</b> và giới hạn hành trình góc cho 6 khớp của Model hiện tại:
+              Bấm <b>🤖 Auto Set Theo Gốc Part</b> để tự lấy tâm quay các khớp theo <b>Gốc Riêng (🟡) của từng Part</b>, hoặc nhập trực tiếp vào bảng dưới đây:
             </p>
             <div class="dh-table-wrapper">
               <table class="dh-table" id="dh-editor-table">
                 <thead>
                   <tr>
                     <th>Khớp</th>
+                    <th title="Trục quay mô phỏng của khớp (X, Y, hoặc Z)">Trục</th>
                     <th title="Độ dài khâu a (mm)">a (mm)</th>
                     <th title="Góc xoắn khâu alpha (deg)">α (°)</th>
                     <th title="Độ lệch khớp d (mm)">d (mm)</th>
@@ -299,10 +320,21 @@
         <button id="btn-gizmo-rotate" class="btn" title="Chế độ Xoay góc Rx/Ry/Rz">🔄 Xoay Góc</button>
         <button id="btn-gizmo-hide" class="btn" title="Ẩn trục kéo Gizmo">Ẩn Gizmo</button>
         <span style="border-left: 1px solid var(--border); margin: 0 4px;"></span>
+        <button id="btn-measure-tool" class="btn" title="Click 2 điểm bất kỳ trên mô hình 3D để đo khoảng cách & kích thước">📏 Đo Kích Thước</button>
+        <span style="border-left: 1px solid var(--border); margin: 0 4px;"></span>
         <button id="btn-cam-iso" class="btn" style="padding: 4px 8px;">ISO</button>
         <button id="btn-cam-top" class="btn" style="padding: 4px 8px;">Top</button>
         <button id="btn-cam-front" class="btn" style="padding: 4px 8px;">Front</button>
         <button id="btn-cam-right" class="btn" style="padding: 4px 8px;">Right</button>
+      </div>
+
+      <!-- Measure Tool Result Floating Readout -->
+      <div id="measure-readout" style="display: none; position: absolute; top: 54px; left: 28px; background: rgba(15, 20, 28, 0.92); border: 1px solid #ffeb3b; border-radius: 6px; padding: 8px 12px; font-size: 11px; font-family: var(--font-mono); z-index: 22; color: #fff; box-shadow: 0 6px 18px rgba(0,0,0,0.5);">
+        <div style="display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 4px;">
+          <span style="color: #ffeb3b; font-weight: 700;">📏 CÔNG CỤ ĐO 3D (Click 2 điểm)</span>
+          <button id="btn-measure-clear" class="btn" style="padding: 1px 6px; font-size: 10px;">Xóa Đo</button>
+        </div>
+        <div id="measure-result-text" style="color: var(--text-dim);">Hãy click điểm thứ 1 trên mô hình 3D...</div>
       </div>
 
       <!-- ========================================================================= -->
@@ -318,21 +350,24 @@
         </div>
 
         <div class="inspector-stl-bar">
-          <span id="insp-stl-filename" style="font-size: 11px; color: var(--accent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-            Chưa gắn file STL (Đang dùng khối mặc định)
-          </span>
-          <div style="display: flex; gap: 4px;">
+          <div style="overflow: hidden;">
+            <div id="insp-stl-filename" style="font-size: 11px; color: var(--accent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+              Chưa gắn file STL (Đang dùng khối mặc định)
+            </div>
+            <div id="insp-stl-bounds" style="font-size: 10px; font-family: var(--font-mono); color: var(--text-dim); margin-top: 2px;"></div>
+          </div>
+          <div style="display: flex; gap: 4px; flex-shrink: 0;">
             <button id="btn-insp-import-stl" class="btn btn-primary" style="padding: 3px 8px; font-size: 11px;">
               📥 Gắn STL...
             </button>
-            <button id="btn-insp-reset-part" class="btn" style="padding: 3px 6px; font-size: 11px;" title="Gỡ STL và quay về khối mặc định">
-              🗑
+            <button id="btn-insp-reset-part" class="btn btn-danger" style="padding: 3px 8px; font-size: 11px;" title="Xóa hoàn toàn Part / File STL này khỏi màn hình 3D (Phím Delete)">
+              🗑 Xóa Part
             </button>
           </div>
         </div>
 
         <div class="inspector-section-label">
-          <span>📍 Vị trí của Part so với Gốc Cố Định (0,0,0):</span>
+          <span>📍 Di chuyển STL + Gốc STL theo Gốc Fix (0,0,0):</span>
         </div>
         <div class="inspector-grid-3">
           <div class="insp-field">
@@ -349,10 +384,7 @@
           </div>
         </div>
 
-        <div class="inspector-section-label" style="margin-top: 8px;">
-          <span>🔄 Góc quay của Part so với Gốc Cố Định (°):</span>
-        </div>
-        <div class="inspector-grid-3">
+        <div class="inspector-grid-3" style="margin-top: 5px;">
           <div class="insp-field">
             <label style="color: #ff5252;">Rx (°)</label>
             <input type="number" id="insp-rot-x" class="num-input" step="5" value="0">
@@ -367,19 +399,68 @@
           </div>
         </div>
 
-        <div style="display: flex; gap: 6px; align-items: center; margin-top: 8px;">
-          <div style="display: flex; align-items: center; gap: 4px;">
-            <label style="font-size: 10px; color: var(--text-dim);">Scale:</label>
-            <input type="number" id="insp-scale" class="num-input" style="width: 54px;" step="0.1" value="1.0">
+        <div id="insp-pivot-section" style="margin-top: 9px; padding-top: 8px; border-top: 1px dashed var(--border);">
+          <div class="inspector-section-label" style="color: #ffd740;">
+            <span>🟡 Điều chỉnh Gốc Riêng của STL (Pivot):</span>
           </div>
-          <div style="flex: 1; display: flex; align-items: center; gap: 4px;">
-            <label style="font-size: 10px; color: var(--text-dim); white-space: nowrap;">Gốc Part:</label>
-            <select id="insp-align-mode" class="num-input" style="flex: 1; text-align: left; font-size: 11px;">
-              <option value="bottom" selected>Đáy Part (Z_min = 0)</option>
-              <option value="center">Tâm Giữa Part</option>
-              <option value="cad">Gốc Xuất CAD</option>
+          <div class="inspector-grid-3">
+            <div class="insp-field">
+              <label style="color: #ff5252;">ΔX (mm)</label>
+              <input type="number" id="insp-pivot-x" class="num-input" step="1" value="0">
+            </div>
+            <div class="insp-field">
+              <label style="color: #69f0ae;">ΔY (mm)</label>
+              <input type="number" id="insp-pivot-y" class="num-input" step="1" value="0">
+            </div>
+            <div class="insp-field">
+              <label style="color: #40c4ff;">ΔZ (mm)</label>
+              <input type="number" id="insp-pivot-z" class="num-input" step="1" value="0">
+            </div>
+          </div>
+          <div class="inspector-grid-3" style="margin-top: 4px;">
+            <div class="insp-field">
+              <label style="color: #ff5252;">ΔRx (°)</label>
+              <input type="number" id="insp-pivot-rx" class="num-input" step="5" value="0">
+            </div>
+            <div class="insp-field">
+              <label style="color: #69f0ae;">ΔRy (°)</label>
+              <input type="number" id="insp-pivot-ry" class="num-input" step="5" value="0">
+            </div>
+            <div class="insp-field">
+              <label style="color: #40c4ff;">ΔRz (°)</label>
+              <input type="number" id="insp-pivot-rz" class="num-input" step="5" value="0">
+            </div>
+          </div>
+        </div>
+
+        <div style="display: flex; gap: 6px; align-items: center; margin-top: 8px;">
+          <div style="display: flex; align-items: center; gap: 3px;">
+            <label style="font-size: 10px; color: var(--text-dim);">Scale:</label>
+            <input type="number" id="insp-scale" class="num-input" style="width: 48px;" step="0.1" value="1.0">
+          </div>
+          <div style="display: flex; align-items: center; gap: 3px;">
+            <label style="font-size: 10px; color: var(--text-dim);">Trục CAD:</label>
+            <select id="insp-up-axis" class="num-input" style="width: 64px; text-align: left; font-size: 10px;" title="Chọn trục hướng lên của phần mềm CAD khi xuất STL (CATIA/Fusion: Z-lên, SolidWorks: Y-lên)">
+              <option value="z" selected>Z-lên</option>
+              <option value="y">Y-lên</option>
             </select>
           </div>
+          <div style="flex: 1; display: flex; align-items: center; gap: 3px;">
+            <select id="insp-align-mode" class="num-input" style="width: 100%; text-align: left; font-size: 10px;" title="Chuẩn gốc của file STL">
+              <option value="cad" selected>Gốc CAD</option>
+              <option value="bottom">Tâm Đáy</option>
+              <option value="center">Tâm Giữa</option>
+            </select>
+          </div>
+        </div>
+
+        <div id="insp-rot-axis-row" style="display: flex; gap: 6px; align-items: center; margin-top: 6px; background: rgba(255, 215, 64, 0.08); border: 1px solid rgba(255, 215, 64, 0.35); border-radius: 5px; padding: 5px 8px;">
+          <label style="font-size: 11px; color: #ffd740; font-weight: 600; white-space: nowrap;">🔄 Trục Quay Của Part:</label>
+          <select id="insp-rot-axis" class="num-input" style="flex: 1; text-align: left; font-size: 11px; font-weight: 700; color: #ffd740;">
+            <option value="x">Trục X (Mũi tên Đỏ)</option>
+            <option value="y">Trục Y (Mũi tên Xanh Lá)</option>
+            <option value="z" selected>Trục Z (Mũi tên Xanh Dương)</option>
+          </select>
         </div>
 
         <div style="display: flex; gap: 5px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border);">
@@ -431,9 +512,12 @@
 
             <div class="waypoint-list" id="waypoint-list"></div>
 
-            <div style="margin-top: 10px; display: flex; gap: 6px; align-items: center;">
+            <div style="margin-top: 10px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap;">
               <button id="btn-play-sim" class="btn btn-primary" style="flex: 1; justify-content: center;">
                 ▶ Chạy Mô Phỏng
+              </button>
+              <button id="btn-auto-avoid" class="btn" style="padding: 6px 8px; border-color: #fbbf24; color: #fbbf24;" title="Tự động sinh các điểm MoveJ trung gian để cánh tay né vật thể Workcell đã import">
+                🛡 Né Vật Cản
               </button>
               <button id="btn-export-gcode" class="btn btn-success" style="padding: 6px 8px;" title="Xuất file G-code">
                 💾 G-code
@@ -537,11 +621,11 @@
     </div>
   </div>
 
-  <script src="js/viewport.js"></script>
-  <script src="js/robot.js"></script>
-  <script src="js/stl_manager.js"></script>
-  <script src="js/trajectory.js"></script>
-  <script src="js/serial.js"></script>
-  <script src="js/app.js"></script>
+  <script src="js/viewport.js?v=2.3"></script>
+  <script src="js/robot.js?v=2.3"></script>
+  <script src="js/stl_manager.js?v=2.3"></script>
+  <script src="js/trajectory.js?v=2.3"></script>
+  <script src="js/serial.js?v=2.3"></script>
+  <script src="js/app.js?v=2.3"></script>
 </body>
 </html>

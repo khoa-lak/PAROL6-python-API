@@ -76,16 +76,22 @@ class STLManager {
       const geom = this.loader.parse(buf);
       this.pendingFiles[linkIndex] = file;
 
-      // Đặt Gốc riêng của STL trùng ngay vào Gốc Cố Định (0,0,0) với đáy STL chạm mặt bàn Z=0
+      // Giữ nguyên 100% gốc tọa độ của file STL khi xuất từ CAD (align_mode = 'cad')
       if (this.robot.linkOffsets[linkIndex]) {
         this.robot.linkOffsets[linkIndex].coord_mode = "world_abs";
-        this.robot.linkOffsets[linkIndex].align_mode = "bottom";
+        this.robot.linkOffsets[linkIndex].align_mode = "cad";
         this.robot.linkOffsets[linkIndex].dx = 0;
         this.robot.linkOffsets[linkIndex].dy = 0;
         this.robot.linkOffsets[linkIndex].dz = 0;
         this.robot.linkOffsets[linkIndex].rx = 0;
         this.robot.linkOffsets[linkIndex].ry = 0;
         this.robot.linkOffsets[linkIndex].rz = 0;
+        this.robot.linkOffsets[linkIndex].pivot_dx = 0;
+        this.robot.linkOffsets[linkIndex].pivot_dy = 0;
+        this.robot.linkOffsets[linkIndex].pivot_dz = 0;
+        this.robot.linkOffsets[linkIndex].pivot_rx = 0;
+        this.robot.linkOffsets[linkIndex].pivot_ry = 0;
+        this.robot.linkOffsets[linkIndex].pivot_rz = 0;
       }
       this.robot.replaceLinkMesh(linkIndex, geom, file.name);
 
@@ -158,7 +164,8 @@ class STLManager {
           dh_table: this.robot.dhTable,
           link_offsets: this.robot.linkOffsets,
           tcp_offset: this.robot.tcpOffset,
-          copy_stls_from_active: true
+          copy_stls_from_active: true,
+          workcell_objects: this.getWorkcellPayload()
         })
       });
       const saveData = await saveRes.json();
@@ -256,6 +263,12 @@ class STLManager {
     if (profile.link_offsets && profile.link_offsets.length === 7) {
       this.robot.updateLinkOffsets(profile.link_offsets);
     }
+
+    if (Array.isArray(profile.workcell_objects)) {
+      this.restoreWorkcellObjects(profile.workcell_objects);
+    } else {
+      this.restoreWorkcellObjects([]);
+    }
     if (profile.tcp_offset) {
       this.robot.setTCPOffset(profile.tcp_offset);
     }
@@ -281,6 +294,12 @@ class STLManager {
 
     if (profile.link_offsets && profile.link_offsets.length === 7) {
       this.robot.updateLinkOffsets(profile.link_offsets);
+    }
+
+    if (Array.isArray(profile.workcell_objects)) {
+      this.restoreWorkcellObjects(profile.workcell_objects);
+    } else {
+      this.restoreWorkcellObjects([]);
     }
 
     const nameInput = document.getElementById('assembly-model-name');
@@ -311,6 +330,78 @@ class STLManager {
     }
   }
 
+  async deleteSinglePart(linkIndex) {
+    try {
+      this.robot.deleteSingleLinkMesh(linkIndex);
+      delete this.savedStlInfo[String(linkIndex)];
+      this.pendingFiles[linkIndex] = null;
+
+      await fetch(`/api/models/${encodeURIComponent(this.activeModelId)}/stl/${linkIndex}`, {
+        method: 'DELETE'
+      });
+
+      await this.refreshModelListDropdown();
+      if (this.app) {
+        if (this.app.selectedTargetType === 'robot_link' && this.app.selectedPartIndex === linkIndex) {
+          this.app.deselectPart();
+        }
+        this.app.renderPartTreeList();
+        this.app.updatePickableObjects();
+        this.app.updateHUDStatus(`🗑 Đã xóa Part ${linkIndex} khỏi màn hình 3D`, 'normal');
+      }
+    } catch (err) {
+      alert('Lỗi khi xóa Part: ' + err.message);
+    }
+  }
+
+  async clearAllModelParts() {
+    try {
+      // Remove all workcell objects too
+      this.workcellObjects.forEach(o => {
+        if (o.mesh) this.scene.remove(o.mesh);
+      });
+      this.workcellObjects = [];
+      this.updateWorkcellUI();
+
+      // Remove all robot 3D meshes
+      this.robot.clearAllLinkMeshes();
+      this.savedStlInfo = {};
+      this.pendingFiles = [null, null, null, null, null, null, null];
+
+      await fetch(`/api/models/${encodeURIComponent(this.activeModelId)}/clear_all`, {
+        method: 'POST'
+      });
+
+      await this.refreshModelListDropdown();
+      if (this.app) {
+        this.app.deselectPart();
+        this.app.renderPartTreeList();
+        this.app.updatePickableObjects();
+        this.app.updateHUDStatus('🧹 Đã xóa trắng toàn bộ các khối có sẵn & STL trên màn hình 3D', 'normal');
+      }
+    } catch (err) {
+      alert('Lỗi khi xóa trắng 3D: ' + err.message);
+    }
+  }
+
+  async restoreDefaultModelBlocks() {
+    try {
+      const res = await fetch(`/api/models/${encodeURIComponent(this.activeModelId)}/restore_defaults`, {
+        method: 'POST'
+      });
+      const profile = await res.json();
+      if (profile.success) {
+        await this.applyLoadedProfileToScene(profile);
+        await this.refreshModelListDropdown();
+        if (this.app) {
+          this.app.updateHUDStatus('🔄 Đã hiện lại 7 khối 3D mẫu PAROL6', 'normal');
+        }
+      }
+    } catch (err) {
+      alert('Lỗi khi khôi phục khối mẫu: ' + err.message);
+    }
+  }
+
   async deleteOrResetModel(modelId) {
     try {
       const res = await fetch(`/api/models/${encodeURIComponent(modelId)}`, { method: 'DELETE' });
@@ -320,7 +411,7 @@ class STLManager {
         await this.refreshModelListDropdown();
         if (this.app) {
           this.app.deselectPart();
-          this.app.updateHUDStatus('Đã khôi phục Model về mặc định', 'normal');
+          this.app.updateHUDStatus('🗑 Đã xóa Model thành công', 'normal');
         }
       }
     } catch (err) {
@@ -365,6 +456,92 @@ class STLManager {
   }
 
   /* --------- Workcell 3D Objects --------- */
+  _arrayBufferToBase64(buffer) {
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    const chunkSize = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+    }
+    return btoa(binary);
+  }
+
+  _base64ToArrayBuffer(b64) {
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes.buffer;
+  }
+
+  getWorkcellPayload() {
+    const d = (rad) => Math.round(THREE.MathUtils.radToDeg(rad) * 100) / 100;
+    const r1 = (v) => Math.round(v * 100) / 100;
+    return this.workcellObjects
+      .filter(o => o.mesh && o.stl_b64)
+      .map(o => ({
+        name: o.name,
+        stl_b64: o.stl_b64,
+        auto_center: !!o.auto_center,
+        pos: [r1(o.mesh.position.x), r1(-o.mesh.position.z), r1(o.mesh.position.y)],
+        rot_deg: [d(o.mesh.rotation.x), d(-o.mesh.rotation.z), d(o.mesh.rotation.y)],
+        scale: r1(o.mesh.scale.x || 1.0)
+      }));
+  }
+
+  restoreWorkcellObjects(items) {
+    this.workcellObjects.forEach(o => {
+      if (o.mesh) this.scene.remove(o.mesh);
+    });
+    this.workcellObjects = [];
+
+    if (Array.isArray(items)) {
+      const r = (deg) => THREE.MathUtils.degToRad(deg || 0);
+      items.forEach((item) => {
+        if (!item || !item.stl_b64) return;
+        try {
+          const buf = this._base64ToArrayBuffer(item.stl_b64);
+          const geometry = this.loader.parse(buf);
+          geometry.rotateX(-Math.PI / 2);
+          geometry.computeVertexNormals();
+          if (item.auto_center) geometry.center();
+
+          const material = new THREE.MeshStandardMaterial({
+            color: 0x94a3b8,
+            roughness: 0.6,
+            metalness: 0.2
+          });
+          const mesh = new THREE.Mesh(geometry, material);
+          const pos = item.pos || [0, 0, 0];
+          const rot = item.rot_deg || [0, 0, 0];
+          const sc = item.scale || 1.0;
+          mesh.position.set(pos[0] || 0, pos[2] || 0, -(pos[1] || 0));
+          mesh.rotation.set(r(rot[0]), r(rot[2]), r(-(rot[1] || 0)));
+          mesh.scale.set(sc, sc, sc);
+          mesh.castShadow = true;
+          mesh.receiveShadow = true;
+          mesh.name = `CAD_${item.name || 'object.stl'}`;
+
+          const idx = this.workcellObjects.length;
+          mesh.userData = { workcellIndex: idx };
+          this.scene.add(mesh);
+          this.workcellObjects.push({
+            name: item.name || `object_${idx + 1}.stl`,
+            mesh: mesh,
+            stl_b64: item.stl_b64,
+            auto_center: !!item.auto_center
+          });
+        } catch (err) {
+          console.warn('Failed to restore workcell object:', item.name, err);
+        }
+      });
+    }
+
+    this.updateWorkcellUI();
+    if (this.app) this.app.updatePickableObjects();
+  }
+
   loadWorkcellCADFromInput() {
     const fileInput = document.getElementById('cad-object-file');
     if (!fileInput || !fileInput.files || !fileInput.files[0]) {
@@ -385,7 +562,9 @@ class STLManager {
     const reader = new FileReader();
     reader.onload = (e) => {
       try {
+        const stlB64 = this._arrayBufferToBase64(e.target.result);
         const geometry = this.loader.parse(e.target.result);
+        geometry.rotateX(-Math.PI / 2);
         geometry.computeVertexNormals();
         if (autoCenter) {
           geometry.center();
@@ -399,8 +578,8 @@ class STLManager {
 
         const mesh = new THREE.Mesh(geometry, material);
         const r = (deg) => THREE.MathUtils.degToRad(deg);
-        mesh.position.set(posX, posZ, posY);
-        mesh.rotation.set(r(rotX), r(rotZ), r(rotY));
+        mesh.position.set(posX, posZ, -posY);
+        mesh.rotation.set(r(rotX), r(rotZ), r(-rotY));
         mesh.scale.set(scale, scale, scale);
         mesh.castShadow = true;
         mesh.receiveShadow = true;
@@ -410,7 +589,7 @@ class STLManager {
         mesh.userData = { workcellIndex: idx };
 
         this.scene.add(mesh);
-        this.workcellObjects.push({ name: file.name, mesh: mesh });
+        this.workcellObjects.push({ name: file.name, mesh: mesh, stl_b64: stlB64, auto_center: autoCenter });
 
         this.updateWorkcellUI();
         if (this.app) this.app.updatePickableObjects();
@@ -451,5 +630,86 @@ class STLManager {
         this.app.deselectPart();
       }
     }
+  }
+
+  /**
+   * Scans ALL Workcell objects and extracts fine world-space obstacle boxes (35mm cells from actual mesh triangles)
+   * in Robotics Z-up (mm) so multi-part, tilted, or multiple separate obstacles are all accurately avoided.
+   */
+  getWorkcellObstaclesAABB() {
+    const obstacles = [];
+    const cellSize = 35.0;
+
+    this.workcellObjects.forEach((obj) => {
+      if (!obj.mesh) return;
+      obj.mesh.updateMatrixWorld(true);
+      const matWorld = obj.mesh.matrixWorld;
+      const geom = obj.mesh.geometry;
+
+      if (geom && geom.attributes && geom.attributes.position) {
+        const posAttr = geom.attributes.position;
+        const v = new THREE.Vector3();
+        const totalVerts = posAttr.count;
+        const stride = totalVerts > 4000 ? Math.floor(totalVerts / 2000) : 1;
+
+        const buildCells = (stepMm) => {
+          const cellMap = new Map();
+          for (let idx = 0; idx < totalVerts; idx += stride) {
+            v.fromBufferAttribute(posAttr, idx).applyMatrix4(matWorld);
+            // Convert Three.js (X, Y_up, Z) -> Robotics (X, -Z, Y_up)
+            const rx = v.x;
+            const ry = -v.z;
+            const rz = v.y;
+            const cx = Math.floor(rx / stepMm);
+            const cy = Math.floor(ry / stepMm);
+            const cz = Math.floor(rz / stepMm);
+            const key = `${cx},${cy},${cz}`;
+            if (!cellMap.has(key)) {
+              cellMap.set(key, {
+                min: [cx * stepMm, cy * stepMm, cz * stepMm],
+                max: [(cx + 1) * stepMm, (cy + 1) * stepMm, (cz + 1) * stepMm]
+              });
+            }
+          }
+          return Array.from(cellMap.values());
+        };
+
+        let subBoxes = buildCells(40.0);
+        if (subBoxes.length > 250) {
+          subBoxes = buildCells(65.0);
+        }
+        const box = new THREE.Box3().setFromObject(obj.mesh);
+        obstacles.push({
+          name: obj.name,
+          min: [
+            Math.round(box.min.x * 10) / 10,
+            Math.round(-box.max.z * 10) / 10,
+            Math.round(box.min.y * 10) / 10
+          ],
+          max: [
+            Math.round(box.max.x * 10) / 10,
+            Math.round(-box.min.z * 10) / 10,
+            Math.round(box.max.y * 10) / 10
+          ],
+          sub_boxes: subBoxes
+        });
+      } else {
+        const box = new THREE.Box3().setFromObject(obj.mesh);
+        obstacles.push({
+          name: obj.name,
+          min: [
+            Math.round(box.min.x * 10) / 10,
+            Math.round(-box.max.z * 10) / 10,
+            Math.round(box.min.y * 10) / 10
+          ],
+          max: [
+            Math.round(box.max.x * 10) / 10,
+            Math.round(-box.min.z * 10) / 10,
+            Math.round(box.max.y * 10) / 10
+          ]
+        });
+      }
+    });
+    return obstacles;
   }
 }
